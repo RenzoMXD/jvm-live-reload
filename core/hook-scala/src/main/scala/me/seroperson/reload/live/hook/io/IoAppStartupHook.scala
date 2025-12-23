@@ -28,6 +28,8 @@ class IoAppStartupHook extends Hook {
   ): Unit = {
     // Disables "IOApp `main` is running on a thread other than the main thread" warnings
     System.setProperty("cats.effect.warnOnNonMainThreadDetected", "false");
+
+    ReflectionUtils.dumpThreads(logger, th.getThreadGroup)
   }
 
 }

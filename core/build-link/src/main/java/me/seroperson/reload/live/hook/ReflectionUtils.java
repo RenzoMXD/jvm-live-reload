@@ -2,9 +2,11 @@ package me.seroperson.reload.live.hook;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import me.seroperson.reload.live.build.BuildLogger;
 
@@ -62,7 +64,8 @@ public final class ReflectionUtils {
    */
   public static void runApplicationShutdownHooks(BuildLogger logger) {
     try {
-      logger.debug("Running shutdown hooks");
+      logger.debug("Running shutdown hooks:");
+      logShutdownHooks(getRegistredShutdownHooks(), logger);
       runHooksMethod.invoke(null);
       logger.debug("java.lang.ApplicationShutdownHooks.runHooks was invoked successfully");
     } catch (Exception e) {
@@ -86,11 +89,35 @@ public final class ReflectionUtils {
     }
   }
 
+  public static void logShutdownHooks(Map<Thread, Thread> hooks, BuildLogger logger) {
+    var entries = hooks.entrySet();
+    if (entries.isEmpty()) {
+      logger.debug("(empty)");
+    } else {
+      entries.stream().forEach((v) -> logger.debug("- " + v.getKey()));
+    }
+  }
+
   public static Map<Thread, Thread> getRegistredShutdownHooks() {
     try {
-      return (Map<Thread, Thread>) hooksField.get(null);
+      var map = (Map<Thread, Thread>) hooksField.get(null);
+      return map == null ? new IdentityHashMap<>() : map;
     } catch (IllegalAccessException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  public static void dumpThreads(BuildLogger logger, ThreadGroup threadGroup) {
+    var threads = new Thread[threadGroup.activeCount()];
+    threadGroup.enumerate(threads);
+    logger.debug("Dumping " + threads.length + " threads:");
+    Arrays.stream(threads).forEach((t) -> logger.debug("- " + t));
+  }
+
+  public static void updateContextClassLoader(
+      ThreadGroup threadGroup, Predicate<Thread> predicate, ClassLoader cl) {
+    var threads = new Thread[threadGroup.activeCount()];
+    threadGroup.enumerate(threads);
+    Arrays.stream(threads).filter(predicate).forEach((t) -> t.setContextClassLoader(cl));
   }
 }

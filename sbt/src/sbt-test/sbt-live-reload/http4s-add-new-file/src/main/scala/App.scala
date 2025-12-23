@@ -24,14 +24,12 @@ object App extends IOApp.Simple {
   }
 
   def runServer[F[_]: Async]: F[Nothing] = {
-    val httpApp = helloWorldRoutes[F].orNotFound
     for {
       _ <-
         EmberServerBuilder
           .default[F]
-          .withHost(ipv4"0.0.0.0")
           .withPort(Port.fromInt(me.seroperson.BuildInfo.port).get)
-          .withHttpApp(httpApp)
+          .withHttpApp(helloWorldRoutes[F].orNotFound)
           .build
     } yield ()
   }.useForever

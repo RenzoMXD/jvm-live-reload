@@ -19,11 +19,18 @@ import me.seroperson.reload.live.build.BuildLogger;
 import me.seroperson.reload.live.build.ReloadableServer;
 import me.seroperson.reload.live.hook.Hook;
 import me.seroperson.reload.live.settings.DevServerSettings;
+import org.xnio.OptionMap;
+import org.xnio.Options;
+import org.xnio.Xnio;
+import org.xnio.XnioWorker;
 
 public class DevServerStart implements ReloadableServer {
 
   private final AtomicBoolean isRunning = new AtomicBoolean(true);
   private final Undertow server;
+  private XnioWorker currentGenerationWorker;
+  private ReloadableProxyClient proxyClientProvider;
+  private ThreadGroup appThreadGroup;
   private Thread appThread;
 
   private ClassLoader classLoader;
@@ -76,12 +83,16 @@ public class DevServerStart implements ReloadableServer {
       silenceJboss();
     }
 
-    var proxyClientProvider =
+    createCurrentGenerationWorker();
+
+    this.proxyClientProvider =
         new ReloadableProxyClient(
             logger, URI.create("http://" + settings.getHttpHost() + ":" + settings.getHttpPort()));
+    this.proxyClientProvider.setCurrentGenerationWorker(currentGenerationWorker);
+
     var proxyHandler =
         new ProxyHandler(
-            proxyClientProvider, 30000, ResponseCodeHandler.HANDLE_404, false, false, 2);
+            proxyClientProvider, 4000, ResponseCodeHandler.HANDLE_404, false, false, 2);
 
     var handler = new ReloadHandler(logger, this, proxyHandler);
 
@@ -92,6 +103,8 @@ public class DevServerStart implements ReloadableServer {
             .setServerOption(UndertowOptions.SHUTDOWN_TIMEOUT, 1000)
             .build();
     server.start();
+
+    appThreadGroup = new ThreadGroup("app");
   }
 
   private Hook initHook(String className) {
@@ -108,18 +121,19 @@ public class DevServerStart implements ReloadableServer {
   }
 
   private synchronized void startInternal(ReloadGeneration generation) {
+    createCurrentGenerationWorker();
+    proxyClientProvider.setCurrentGenerationWorker(currentGenerationWorker);
+
     this.classLoader = generation.getReloadedClassLoader();
     this.appThread =
         new Thread(
+            appThreadGroup,
             () -> {
-              var currentThread = Thread.currentThread();
-              currentThread.setName("main");
-
               logger.info("🚀 Starting " + mainClass);
-
               try {
                 Class<?> clazz = classLoader.loadClass(mainClass);
                 var mainMethod = clazz.getMethod("main", String[].class);
+                var currentThread = Thread.currentThread();
                 logger.debug(
                     "Running with Context ClassLoader: "
                         + currentThread.getContextClassLoader()
@@ -138,7 +152,8 @@ public class DevServerStart implements ReloadableServer {
                   logger.error("Error in application main thread", e);
                 }
               }
-            });
+            },
+            "main");
     appThread.setContextClassLoader(classLoader);
     appThread.start();
 
@@ -146,6 +161,8 @@ public class DevServerStart implements ReloadableServer {
   }
 
   private synchronized void stopInternal() {
+    currentGenerationWorker.shutdownNow();
+
     if (appThread != null) {
       logger.debug("Stopping " + mainClass);
       runHooks(appThread, classLoader, shutdownHooks);
@@ -216,6 +233,26 @@ public class DevServerStart implements ReloadableServer {
   @Override
   public boolean isRunning() {
     return isRunning.get();
+  }
+
+  private void createCurrentGenerationWorker() {
+    var ioThreads = Math.max(Runtime.getRuntime().availableProcessors(), 2);
+    try {
+      this.currentGenerationWorker =
+          Xnio.getInstance(getClass().getClassLoader())
+              .createWorker(
+                  OptionMap.builder()
+                      .set(Options.WORKER_IO_THREADS, ioThreads)
+                      .set(Options.CONNECTION_HIGH_WATER, 1000000)
+                      .set(Options.CONNECTION_LOW_WATER, 1000000)
+                      .set(Options.WORKER_TASK_CORE_THREADS, ioThreads * 8)
+                      .set(Options.WORKER_TASK_MAX_THREADS, ioThreads * 8)
+                      .set(Options.TCP_NODELAY, true)
+                      .set(Options.CORK, true)
+                      .getMap());
+    } catch (Exception e) {
+      logger.error("Error during initializing proxy connection worker", e);
+    }
   }
 
   // Shameful copy-n-paste from cask.main.Main.silenceJboss

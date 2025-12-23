@@ -21,7 +21,8 @@ port := (if (isSbt2.value) 8081 else 8080)
 
 liveDevSettings := Seq(
   DevSettingsKeys.LiveReloadProxyHttpPort -> proxyPort.value.toString,
-  DevSettingsKeys.LiveReloadHttpPort -> port.value.toString
+  DevSettingsKeys.LiveReloadHttpPort -> port.value.toString,
+  DevSettingsKeys.LiveReloadIsDebug -> "true"
 )
 
 buildInfoKeys := Seq[BuildInfoKey](port)
@@ -30,6 +31,7 @@ buildInfoPackage := "me.seroperson"
 InputKey[Unit]("verifyResourceContains") := {
   import sttp.client4.quick._
   import sttp.client4.Response
+  import com.eed3si9n.expecty.Expecty.assert
 
   val args = Def.spaceDelimited("<path> <status> <words> ...").parsed
   val path :: status :: assertions = args

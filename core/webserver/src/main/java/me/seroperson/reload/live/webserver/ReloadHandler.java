@@ -7,7 +7,7 @@ import me.seroperson.reload.live.build.BuildLogger;
 import me.seroperson.reload.live.build.ReloadableServer;
 import me.seroperson.reload.live.hook.UnrecoverableHookException;
 
-public class ReloadHandler implements HttpHandler {
+class ReloadHandler implements HttpHandler {
 
   public static final AttachmentKey<Boolean> WAS_RELOADED = AttachmentKey.create(Boolean.class);
 
@@ -30,7 +30,7 @@ public class ReloadHandler implements HttpHandler {
       httpServerExchange.putAttachment(WAS_RELOADED, wasReloaded);
 
       next.handleRequest(httpServerExchange);
-      logger.debug("Request successfully handled in ReloadHandler");
+      logger.debug("Request successfully handled in ReloadHandler. Was reloaded: " + wasReloaded);
     } catch (UnrecoverableHookException e) {
       logger.error("Unrecoverable error during reloading", e);
       httpServerExchange.setResponseCode(404);

@@ -31,15 +31,21 @@ class IoAppEffectShutdownHook extends Hook {
       settings: DevServerSettings,
       logger: BuildLogger
   ): Unit = {
-    // todo: try and fail with UnrecoverableHookException
-    val allCollectedRuntimes =
-      IORuntime.allRuntimes.unsafeHashtable().filter(_ != null).collect {
-        case runtime: IORuntime =>
-          runtime.shutdown()
-          runtime
+    var appThreadGroup = th.getThreadGroup()
+    th.interrupt()
+    th.join()
+
+    if (appThreadGroup != null) {
+      val threads = new Array[Thread](appThreadGroup.activeCount())
+      val count = appThreadGroup.enumerate(threads);
+      val cancelHook = threads.find(_.getName.startsWith("io-cancel"))
+      cancelHook match {
+        case Some(hook) =>
+          logger.debug(s"Found cats-effect cancel hook")
+          hook.join()
+        case None =>
+          logger.debug(s"cats-effect wasn't found")
       }
-    allCollectedRuntimes.foreach { runtime =>
-      IORuntime.allRuntimes.remove(runtime, runtime.hashCode())
     }
 
     // For some reason this observer isn't unregistering automatically
@@ -50,9 +56,7 @@ class IoAppEffectShutdownHook extends Hook {
         mBeanServer.unregisterMBean(mBeanObjectName)
       } catch {
         case ex: Exception =>
-          logger.debug(
-            s"Error during unregistering monitoring bean: ${ex.getMessage}"
-          )
+        // Ignore unregistering errors
       }
     }
 

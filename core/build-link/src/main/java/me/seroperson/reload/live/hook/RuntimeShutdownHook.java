@@ -38,6 +38,8 @@ public class RuntimeShutdownHook implements Hook {
 
   @Override
   public void hook(Thread th, ClassLoader cl, DevServerSettings settings, BuildLogger logger) {
+    logger.debug("Skipping shutdown hooks:");
+    ReflectionUtils.logShutdownHooks(buildSystemShutdownHooks, logger);
     // Unregistering build-system shutdown hooks
     ReflectionUtils.unregisterShutdownHooks(buildSystemHookThreadIds);
     ReflectionUtils.runApplicationShutdownHooks(logger);

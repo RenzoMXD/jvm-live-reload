@@ -23,7 +23,8 @@ lazy val `project-a` = (project in file("project-a"))
 
     liveDevSettings := Seq(
       DevSettingsKeys.LiveReloadProxyHttpPort -> proxyPort.value.toString,
-      DevSettingsKeys.LiveReloadHttpPort -> port.value.toString
+      DevSettingsKeys.LiveReloadHttpPort -> port.value.toString,
+      DevSettingsKeys.LiveReloadIsDebug -> "true"
     ),
 
     buildInfoKeys := Seq[BuildInfoKey](port),

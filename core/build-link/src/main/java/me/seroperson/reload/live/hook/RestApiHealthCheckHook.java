@@ -15,27 +15,33 @@ interface RestApiHealthCheckHook extends HealthCheckHook {
 
   default int isHealthy(BuildLogger logger, String path, String host, int port) {
     try {
-      // logger.warn("⚠️ Requesting health-check");
       var url = new URI("http://" + host + ":" + port + path).toURL();
       HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+      connection.setRequestProperty("Connection", "close");
       connection.setReadTimeout(500);
       connection.setConnectTimeout(500);
-      var responseCode = connection.getResponseCode();
-      if (responseCode == 404) {
-        return 404;
+      try {
+        var responseCode = connection.getResponseCode();
+        if (responseCode == 404) {
+          return 404;
+        }
+        var isSuccess = responseCode >= 200 && responseCode < 300;
+        if (isSuccess) {
+          return 1;
+        } else {
+          return 0;
+        }
+      } catch (java.net.ConnectException e) {
+        return -1;
+      } catch (java.io.IOException e) {
+        return -1;
+      } catch (Exception e) {
+        logger.error("Error during requesting health-check", e);
+        return -1;
+      } finally {
+        connection.disconnect();
       }
-      var isSuccess = responseCode >= 200 && responseCode < 300;
-      if (isSuccess) {
-        return 1;
-      } else {
-        return 0;
-      }
-    } catch (java.net.ConnectException e) {
-      return -1;
-    } catch (java.io.IOException e) {
-      return -1;
     } catch (Exception e) {
-      logger.error("Error during requesting health-check", e);
       return -1;
     }
   }

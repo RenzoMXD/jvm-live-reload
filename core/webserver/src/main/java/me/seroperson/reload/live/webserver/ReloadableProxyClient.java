@@ -17,18 +17,20 @@ import me.seroperson.reload.live.build.BuildLogger;
 import org.xnio.ChannelListener;
 import org.xnio.IoUtils;
 import org.xnio.OptionMap;
+import org.xnio.XnioWorker;
 
 /**
  * Initially it was the SimpleProxyClientProvider from undertow library, but we had to tweak it a
  * little to support reconnection after reload.
  */
-public class ReloadableProxyClient implements ProxyClient {
+class ReloadableProxyClient implements ProxyClient {
 
   private final URI uri;
   private final AttachmentKey<ClientConnection> clientAttachmentKey =
       AttachmentKey.create(ClientConnection.class);
   private final UndertowClient client;
   private final BuildLogger logger;
+  private XnioWorker currentGenerationWorker;
 
   private static final ProxyTarget TARGET = new ProxyTarget() {};
 
@@ -43,6 +45,10 @@ public class ReloadableProxyClient implements ProxyClient {
     return TARGET;
   }
 
+  public void setCurrentGenerationWorker(XnioWorker worker) {
+    this.currentGenerationWorker = worker;
+  }
+
   @Override
   public void getConnection(
       ProxyTarget target,
@@ -52,18 +58,24 @@ public class ReloadableProxyClient implements ProxyClient {
       TimeUnit timeUnit) {
     ClientConnection existing = exchange.getConnection().getAttachment(clientAttachmentKey);
     if (existing != null) {
+      logger.debug("Connection already exists");
       if (existing.isOpen()) {
         var wasReloaded = exchange.getAttachment(ReloadHandler.WAS_RELOADED);
+        logger.debug("Reusing opened proxy connection. Was reloaded: " + wasReloaded);
         if (wasReloaded != null && wasReloaded) {
-          logger.debug("Closing existing proxy connection");
+          logger.debug("Closing existing proxy connection after reloading");
+
+          existing.getCloseSetter().set(null);
           IoUtils.safeClose(existing);
+          exchange.getConnection().removeAttachment(clientAttachmentKey);
+          exchange.removeAttachment(ReloadHandler.WAS_RELOADED);
+
           client.connect(
               new ConnectNotifier(callback, exchange),
               uri,
-              exchange.getIoThread(),
+              currentGenerationWorker,
               exchange.getConnection().getByteBufferPool(),
               OptionMap.EMPTY);
-          exchange.removeAttachment(ReloadHandler.WAS_RELOADED);
         } else {
           // this connection already has a client, re-use it
           callback.completed(
@@ -74,10 +86,11 @@ public class ReloadableProxyClient implements ProxyClient {
         exchange.getConnection().removeAttachment(clientAttachmentKey);
       }
     }
+    logger.debug("Creating a new proxy connection for path " + exchange.getRequestPath());
     client.connect(
         new ConnectNotifier(callback, exchange),
         uri,
-        exchange.getIoThread(),
+        currentGenerationWorker,
         exchange.getConnection().getByteBufferPool(),
         OptionMap.EMPTY);
   }
@@ -100,6 +113,7 @@ public class ReloadableProxyClient implements ProxyClient {
             @Override
             public void closed(ServerConnection serverConnection) {
               IoUtils.safeClose(connection);
+              logger.debug("Closing server proxy connection for path " + exchange.getRequestPath());
             }
           });
       connection
@@ -109,12 +123,12 @@ public class ReloadableProxyClient implements ProxyClient {
                 @Override
                 public void handleEvent(Channel channel) {
                   serverConnection.removeAttachment(clientAttachmentKey);
-                  logger.debug("Closing proxy connection");
+                  logger.debug(
+                      "Closing client proxy connection for path " + exchange.getRequestPath());
                 }
               });
-      callback.completed(
-          exchange, new ProxyConnection(connection, uri.getPath() == null ? "/" : uri.getPath()));
-      logger.debug("Proxy got response with code " + exchange.getStatusCode());
+      var path = uri.getPath() == null ? "/" : uri.getPath();
+      callback.completed(exchange, new ProxyConnection(connection, path));
     }
 
     @Override

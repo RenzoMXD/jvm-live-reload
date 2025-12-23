@@ -18,24 +18,25 @@ class ZioAppStartupHook extends Hook {
       settings: DevServerSettings,
       logger: BuildLogger
   ) = {
+    ReflectionUtils.dumpThreads(logger, th.getThreadGroup)
+
     // We need to update Context ClassLoader on all ZScheduler workers
     // because they usually survive reload
-
-    val threadGroup = Thread.currentThread.getThreadGroup
-    val threads = new Array[Thread](threadGroup.activeCount)
-    threadGroup.enumerate(threads)
-    logger.debug(s"Got ${threadGroup.activeCount} active threads.")
-    val filteredCount = threads
-      .filter(v =>
-        v != null && (v.getName.startsWith("ZScheduler") || v.getName
-          .startsWith("zio-"))
-      )
-      .map(v => {
-        v.setContextClassLoader(cl)
-      })
-      .length
+    var matchedCount = ReflectionUtils.updateContextClassLoader(
+      th.getThreadGroup,
+      v =>
+        (if (v == null)
+           false
+         else {
+           var threadName = v.getName
+           threadName.startsWith("ZScheduler") || threadName.startsWith(
+             "zio"
+           ) || threadName.startsWith("globalEventExecutor")
+         }),
+      cl
+    )
     logger.debug(
-      s"Setting $cl as a context classloader for $filteredCount threads"
+      s"Set $cl as a context classloader zio computing threads"
     )
   }
 

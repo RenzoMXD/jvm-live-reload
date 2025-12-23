@@ -9,7 +9,6 @@ import org.http4s.dsl.Http4sDsl
 import org.http4s.dsl.io._
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits._
-import fs2.io.net.Network
 
 object App extends IOApp.Simple {
 
@@ -24,7 +23,7 @@ object App extends IOApp.Simple {
     }
   }
 
-  def runServer[F[_]: Async: Network]: F[Nothing] = {
+  def runServer[F[_]: Async]: F[Nothing] = {
     for {
       _ <-
         EmberServerBuilder
