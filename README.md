@@ -12,11 +12,11 @@
 <!-- prettier-ignore-end -->
 
 This project aims to provide a consistent live reload experience for any **web**
-application (currently you can't yet use it with daemons) on the JVM. It allows
-you to speed up your development cycle regardless of what framework or library
-you're using. Read an article **[♾️ Live Reloading on JVM][15]** for more
-information on the reloading topic and prerequisites for the creation of this
-project.
+or **GRPC** application (currently you can't yet use it with daemons) on the
+JVM. It allows you to speed up your development cycle regardless of what
+framework or library you're using. Read an article **[♾️ Live Reloading on
+JVM][15]** for more information on the reloading topic and prerequisites for the
+creation of this project.
 
 <p align="center">
   <img src=".github/preview.gif" alt="Preview" width="700px">
@@ -30,6 +30,11 @@ project.
   - [mill](#mill)
   - [Fixing the InaccessibleObjectException error](#fixing-the-inaccessibleobjectexception-error)
   - [Tuning your webserver](#tuning-your-webserver)
+- [GRPC](#grpc)
+  - [Switching to GRPC mode](#switching-to-grpc-mode)
+  - [Health checking](#health-checking)
+  - [Streaming and reflection](#streaming-and-reflection)
+  - [TLS](#tls)
 - [Configuration](#configuration)
   - [Hooks](#hooks)
   - [Propagate environment](#propagate-environment)
@@ -74,9 +79,12 @@ Minimum required JDK is **17**.
 > [!IMPORTANT]
 > After making all the necessary changes, be sure to read the 
 > [Configuration](#configuration) section to tweak default settings according 
-> to your setup. By default live-reloading proxy will start at `:9000` port 
-> and your application is expected to listen at `:8080`. You must now send 
-> requests to the proxy, not an application itself.
+> to your setup. By default the HTTP proxy starts at `:9000` and your 
+> application is expected to listen at `:8080`. For GRPC the defaults are 
+> `:9001` for the proxy and `:8081` for the target application. You must now 
+> send requests to the proxy, not an application itself. See the 
+> [GRPC](#grpc) section if you want to live-reload a GRPC server instead of 
+> an HTTP one.
 <!-- prettier-ignore-end -->
 
 ### Changes to the application code
@@ -212,6 +220,141 @@ object App extends ZIOAppDefault {
 }
 ```
 
+## GRPC
+
+Besides HTTP, the plugin can also live-reload GRPC servers. The idea is exactly
+the same: a reverse proxy sits in front of your application, routes all calls
+into it and re-creates a `ClassLoader` when sources change. The difference is
+that the proxy speaks HTTP/2 and the GRPC framing protocol instead of plain
+HTTP, so unary, server-streaming, client-streaming and bidirectional calls all
+keep working across reloads.
+
+The proxy does not need to know about your `.proto` files. It forwards raw
+messages by service and method name, so it works with any code generator and any
+GRPC server implementation built on top of `io.grpc` (Netty, Netty-shaded,
+Armeria, and so on).
+
+### Switching to GRPC mode
+
+For `sbt`, enable the plugin as usual and switch the server type:
+
+```scala
+enablePlugins(LiveReloadPlugin)
+
+liveServerType := me.seroperson.reload.live.sbt.GrpcServerType
+```
+
+For `gradle`:
+
+```kotlin
+liveReload {
+  serverType = me.seroperson.reload.live.gradle.ServerType.GRPC
+}
+```
+
+For `mill`:
+
+```scala
+import me.seroperson.reload.live.mill.*
+
+object app extends LiveReloadModule, ScalaModule {
+  override def liveServerType = Task.Anon { GrpcServerType }
+}
+```
+
+Once GRPC mode is on, the proxy listens on `:9001` and expects your application
+to listen on `:8081`. The HTTP keys (`live.reload.proxy.http.*`,
+`live.reload.http.*`) are ignored. Use `live.reload.proxy.grpc.*` and
+`live.reload.grpc.*` to override hosts and ports - see the
+[Configuration](#configuration) section for the full list.
+
+The same requirements from
+[Changes to the application code](#changes-to-the-application-code) still apply:
+the `main` method must handle `InterruptedException`, gracefully shut down the
+GRPC server and only return when everything is stopped. Most GRPC servers
+already follow this pattern through `Server#awaitTermination` plus
+`Server#shutdownNow`, so usually you just need to wrap the awaiting call into a
+`try`/`catch`.
+
+### Health checking
+
+Instead of polling an HTTP `/health` endpoint, the GRPC mode uses the standard
+[`grpc.health.v1.Health`][18] service to decide whether the application is ready
+or fully stopped. So your application must expose this service. With most GRPC
+distributions it is a one-liner using `HealthStatusManager` from
+`grpc-services`:
+
+```scala
+import io.grpc.health.v1.HealthCheckResponse
+import io.grpc.netty.NettyServerBuilder
+import io.grpc.protobuf.services.HealthStatusManager
+
+val health = new HealthStatusManager()
+val server = NettyServerBuilder
+  .forPort(8081)
+  .addService(new GreeterImpl)
+  .addService(health.getHealthService)
+  .build()
+  .start()
+
+health.setStatus("", HealthCheckResponse.ServingStatus.SERVING)
+
+try {
+  server.awaitTermination()
+} catch {
+  case _: InterruptedException =>
+    health.setStatus("", HealthCheckResponse.ServingStatus.NOT_SERVING)
+    server.shutdownNow()
+}
+```
+
+By default, the proxy queries the overall server status (empty service name). If
+you want it to look at a specific service instead, set
+`live.reload.grpc.health.service` to the fully qualified service name.
+
+When the GRPC server type is selected, the plugin automatically picks the
+`GrpcAppHookBundle`, which uses `GrpcHealthCheckStartupHook` and
+`GrpcHealthCheckShutdownHook` in place of their HTTP counterparts. You can still
+override the hook set manually through `liveStartupHooks` and
+`liveShutdownHooks` - check the [Hooks](#hooks) section for details.
+
+### Streaming and reflection
+
+The proxy is fully transparent for all four RPC kinds (unary, server-streaming,
+client-streaming, bidirectional) and forwards trailers, statuses and metadata as
+is. It also passes through the standard [GRPC server reflection][19] service, so
+tools like `grpcurl`, `evans` or BloomRPC keep working against the proxy as if
+they were talking to your application directly. Just register
+`ProtoReflectionService` in your server and point the tool at the proxy port.
+
+### TLS
+
+The proxy can listen with TLS and/or talk to the target server using TLS. Both
+sides are independent, so the typical setup of a TLS application behind a
+plaintext proxy is supported, as well as fully encrypted end-to-end traffic.
+
+Enable TLS on the proxy listener by providing a PEM-encoded certificate chain
+and private key:
+
+```kotlin
+liveReload {
+  serverType = me.seroperson.reload.live.gradle.ServerType.GRPC
+  settings = mapOf(
+    "live.reload.grpc.proxy.tls.cert" to "/abs/path/to/cert.pem",
+    "live.reload.grpc.proxy.tls.key" to "/abs/path/to/key.pem"
+  )
+}
+```
+
+Tell the proxy to use TLS for the upstream channel with
+`live.reload.grpc.target.tls=true`. If the target uses a self-signed
+certificate, point `live.reload.grpc.target.tls.trust` at the corresponding CA
+or leaf certificate; otherwise the JVM default truststore is used.
+
+Same goes for the health-check hooks - they reuse the upstream TLS settings, so
+once `live.reload.grpc.target.tls` is enabled the readiness probe will also
+connect over TLS automatically.
+
 ## Configuration
 
 This plugin has defaults that should be suitable for most people, but you can
@@ -219,14 +362,23 @@ change them using environment variables or build configuration.
 
 First, let's check the list of available options:
 
-| Key                           | Environment                   | Default     | Description                                   |
-| ----------------------------- | ----------------------------- | ----------- | --------------------------------------------- |
-| `live.reload.proxy.http.host` | `LIVE_RELOAD_PROXY_HTTP_HOST` | `0.0.0.0`   | The host for the proxy to start on            |
-| `live.reload.proxy.http.port` | `LIVE_RELOAD_PROXY_HTTP_PORT` | `9000`      | The port for the proxy to listen on           |
-| `live.reload.http.host`       | `LIVE_RELOAD_HTTP_HOST`       | `localhost` | The host on which your web application starts |
-| `live.reload.http.port`       | `LIVE_RELOAD_HTTP_PORT`       | `8080`      | The port your web application listens on      |
-| `live.reload.http.health`     | `LIVE_RELOAD_HTTP_HEALTH`     | `/health`   | Path to your health-check endpoint            |
-| `live.reload.debug`           | `LIVE_RELOAD_DEBUG`           | `false`     | Whether to enable/disable debug output        |
+| Key                                 | Environment                         | Default     | Description                                                                                                                                         |
+| ----------------------------------- | ----------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `live.reload.proxy.http.host`       | `LIVE_RELOAD_PROXY_HTTP_HOST`       | `0.0.0.0`   | The host for the proxy to start on                                                                                                                  |
+| `live.reload.proxy.http.port`       | `LIVE_RELOAD_PROXY_HTTP_PORT`       | `9000`      | The port for the proxy to listen on                                                                                                                 |
+| `live.reload.http.host`             | `LIVE_RELOAD_HTTP_HOST`             | `localhost` | The host on which your web application starts                                                                                                       |
+| `live.reload.http.port`             | `LIVE_RELOAD_HTTP_PORT`             | `8080`      | The port your web application listens on                                                                                                            |
+| `live.reload.http.health`           | `LIVE_RELOAD_HTTP_HEALTH`           | `/health`   | Path to your health-check endpoint                                                                                                                  |
+| `live.reload.proxy.grpc.host`       | `LIVE_RELOAD_PROXY_GRPC_HOST`       | `localhost` | The host for the GRPC proxy to start on                                                                                                             |
+| `live.reload.proxy.grpc.port`       | `LIVE_RELOAD_PROXY_GRPC_PORT`       | `9001`      | The port for the GRPC proxy to listen on                                                                                                            |
+| `live.reload.grpc.host`             | `LIVE_RELOAD_GRPC_HOST`             | `localhost` | The host on which your GRPC application starts                                                                                                      |
+| `live.reload.grpc.port`             | `LIVE_RELOAD_GRPC_PORT`             | `8081`      | The port your GRPC application listens on                                                                                                           |
+| `live.reload.grpc.health.service`   | `LIVE_RELOAD_GRPC_HEALTH_SERVICE`   | `""`        | Service name to query through `grpc.health.v1.Health` (empty means overall server health)                                                           |
+| `live.reload.grpc.target.tls`       | `LIVE_RELOAD_GRPC_TARGET_TLS`       | `false`     | Whether the proxy should connect to the target GRPC server using TLS                                                                                |
+| `live.reload.grpc.target.tls.trust` | `LIVE_RELOAD_GRPC_TARGET_TLS_TRUST` | `""`        | Path to a PEM-encoded CA/leaf certificate used to verify the target server (empty falls back to the JVM default truststore)                         |
+| `live.reload.grpc.proxy.tls.cert`   | `LIVE_RELOAD_GRPC_PROXY_TLS_CERT`   | `""`        | Path to a PEM-encoded certificate chain used by the proxy listener (paired with the key below)                                                      |
+| `live.reload.grpc.proxy.tls.key`    | `LIVE_RELOAD_GRPC_PROXY_TLS_KEY`    | `""`        | Path to a PEM-encoded private key used by the proxy listener (when both this and the cert are set, the proxy listens with TLS instead of plaintext) |
+| `live.reload.debug`                 | `LIVE_RELOAD_DEBUG`                 | `false`     | Whether to enable/disable debug output                                                                                                              |
 
 To change variables using build configuration, use the following key for `sbt`:
 
@@ -292,6 +444,14 @@ The complete list of built-in hooks:
     <td>Blocks until failure on <code>/health</code> endpoint.</td>
   </tr>
   <tr>
+    <td><a href="https://github.com/seroperson/jvm-live-reload/blob/main/core/webserver-grpc/src/main/java/me/seroperson/reload/live/webserver/grpc/hook/GrpcHealthCheckStartupHook.java">GrpcHealthCheckStartupHook</a></td>
+    <td>Blocks until <code>grpc.health.v1.Health</code> reports <code>SERVING</code> on the target server. Reuses upstream TLS settings when enabled.</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/seroperson/jvm-live-reload/blob/main/core/webserver-grpc/src/main/java/me/seroperson/reload/live/webserver/grpc/hook/GrpcHealthCheckShutdownHook.java">GrpcHealthCheckShutdownHook</a></td>
+    <td>Blocks until <code>grpc.health.v1.Health</code> stops reporting <code>SERVING</code> (or the channel fails).</td>
+  </tr>
+  <tr>
     <td><a href="https://github.com/seroperson/jvm-live-reload/blob/main/core/build-link/src/main/java/me/seroperson/reload/live/hook/RuntimeShutdownHook.java">RuntimeShutdownHook</a></td>
     <td>Uses reflection to call all JVM shutdown hooks added by <code>Runtime.addShutdownHook</code>.</td>
   </tr>
@@ -320,10 +480,11 @@ The complete list of built-in hooks:
 The `sbt` and `mill` plugins also provide a set of predefined hooks, so-called
 hook bundles, which will be automatically used when a plugin finds the
 corresponding library in a classpath. Currently, supported sets are:
-`ZioAppHookBundle`, `IoAppHookBundle` and `CaskAppHookBundle`. All available
-options are defined in [HookBundle.scala][4]. You can also override a set of
-startup/shutdown hooks using the `liveStartupHooks` and `liveShutdownHooks`
-keys. For example:
+`ZioAppHookBundle`, `IoAppHookBundle`, `CaskAppHookBundle` and
+`GrpcAppHookBundle` (picked automatically once `liveServerType` is set to
+`GrpcServerType`). All available options are defined in [HookBundle.scala][4].
+You can also override a set of startup/shutdown hooks using the
+`liveStartupHooks` and `liveShutdownHooks` keys. For example:
 
 ```scala
 // The order matters (!)
@@ -443,6 +604,18 @@ whether their own setup will work.
     <td><a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/plugin/plugin/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadJavalinTest.kt">LiveReloadJavalinTest.kt</a>, <a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/plugin/plugin/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadJavalinJteTest.kt">LiveReloadJavalinJteTest.kt</a></td>
     <td>Everything from <a href="#changes-to-the-application-code">this section</a>.</td>
   </tr>
+  <tr>
+    <td><a href="https://github.com/grpc/grpc-java">grpc-java</a> (Kotlin, unary + streaming + reflection + TLS)</td>
+    <td><i>grpc-java</i> <b>1.72.0</b></td>
+    <td><a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadGrpcTest.kt">LiveReloadGrpcTest.kt</a>, <a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadGrpcStreamingTest.kt">LiveReloadGrpcStreamingTest.kt</a>, <a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadGrpcReflectionTest.kt">LiveReloadGrpcReflectionTest.kt</a>, <a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadGrpcTlsTest.kt">LiveReloadGrpcTlsTest.kt</a>, <a href="https://github.com/seroperson/jvm-live-reload/blob/main/gradle/src/functionalTest/kotlin/me.seroperson.reload.live.gradle/LiveReloadGrpcMultiprojectTest.kt">LiveReloadGrpcMultiprojectTest.kt</a></td>
+    <td>Expose <code>grpc.health.v1.Health</code> plus everything from <a href="#changes-to-the-application-code">this section</a>.</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/scalapb/ScalaPB">scalapb</a> + <a href="https://github.com/grpc/grpc-java">grpc-netty</a></td>
+    <td><i>scalapb</i> <b>0.11.17</b> (sbt) / <b>1.0.0-alpha.3</b> (mill), <i>grpc-java</i> <b>1.72.0</b></td>
+    <td>See <code>grpc-*</code> in <a href="https://github.com/seroperson/jvm-live-reload/tree/main/sbt/src/test/resources">sbt test resources</a> and <a href="https://github.com/seroperson/jvm-live-reload/tree/main/mill/integration/resources">mill integration resources</a>. Covers Scala 2.13, Scala 3, multiproject layouts, streaming and TLS.</td>
+    <td>Expose <code>grpc.health.v1.Health</code> plus everything from <a href="#changes-to-the-application-code">this section</a>.</td>
+  </tr>
 </table>
 
 Everything was tested under JDK 17, but later versions should work too.
@@ -495,4 +668,6 @@ SOFTWARE.
 [15]: https://seroperson.me/2025/11/28/jvm-live-reload/
 [16]: https://github.com/Philippus/sbt-dotenv
 [17]: https://github.com/seroperson/jvm-live-reload/tree/main/sbt/src/test/resources/http4s-dotenv
+[18]: https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+[19]: https://github.com/grpc/grpc/blob/master/doc/server-reflection.md
 <!-- prettier-ignore-end -->
