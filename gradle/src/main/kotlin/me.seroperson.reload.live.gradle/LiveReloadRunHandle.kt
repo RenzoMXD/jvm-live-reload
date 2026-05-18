@@ -94,7 +94,7 @@ open class LiveReloadRunHandle
                         buildLogger,
                     )
                 // Visible only when running with `--info`
-                DevServerRunner.printBanner(params, buildLogger)
+                DevServerRunner.printBanner(devServer, buildLogger)
             } finally {
                 lock.writeLock().unlock()
             }

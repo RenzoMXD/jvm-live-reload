@@ -37,6 +37,7 @@ public final class StartParams {
    * @param internalMainClassName the fully qualified name of the actual application main class
    * @param startupHookClasses the list of fully qualified class names for startup hooks
    * @param shutdownHookClasses the list of fully qualified class names for shutdown hooks
+   * @param propagateEnv the map of environment variables to propagate into the application JVM
    */
   public StartParams(
       DevServerSettings settings,
